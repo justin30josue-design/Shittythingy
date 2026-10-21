@@ -41,9 +41,196 @@
 #include <fstream>
 #include <unordered_map>
 #include <unordered_set>
-#include <vector>
+#include <vector> 
 
 using namespace geode::prelude;
+
+struct Buffer {
+    bool realInput = false;
+    bool appliedInput = false;
+    bool deathResetDone = true; // Paso 1: Variable añadida aquí
+    bool isPlayer1 = true;
+    bool autoReleased = false;
+    bool autoDash = false;
+    int rapid = 0;
+    int sinceInput = 999;
+    bool shipBuffer = false;
+    bool enabled = true;
+    bool simulating = false;
+    bool ghostDied = false;
+    bool injecting = false;
+    float tickLength = 0.f;
+    CCNode* pathNode = nullptr;
+};
+
+static Buffer buf;
+static int tickCount = 0;
+
+void resetPending() {
+    buf.appliedInput = false;
+}
+
+// Paso 2: Función clearRuntimeInput
+void clearRuntimeInput(PlayLayer* layer, bool forceRelease) {
+    // Si el juego quedó con el botón pulsado, suéltalo una sola vez.
+    // Esto evita que un salto retrasado sobreviva a la muerte.
+    if (forceRelease && layer && !buf.injecting && !buf.deathResetDone) {
+        bool player1 = buf.isPlayer1;
+        buf.injecting = true;
+        layer->handleButton(false, 1, player1);
+        buf.injecting = false;
+    }
+
+    resetPending();
+
+    buf.realInput = false;
+    buf.appliedInput = false;
+    buf.isPlayer1 = true;
+    buf.autoReleased = false;
+    buf.autoDash = false;
+    buf.rapid = 0;
+    buf.sinceInput = 999;
+    buf.deathResetDone = true;
+}
+
+// Paso 3: dropGhosts() actualizado
+void dropGhosts() {
+    buf.realInput = false;
+    buf.appliedInput = false;
+    buf.isPlayer1 = true;
+    buf.sinceInput = 999;
+    buf.deathResetDone = true;
+}
+
+// Paso 4: Corrige el paso de entradas mientras estás muerto en intercept()
+bool intercept(PlayLayer* layer, PlayerObject* p1, bool down, int button, bool anyShip) {
+    // Muerto: no guardar ni dejar pasar entradas físicas. Así un clic
+    // mantenido durante la muerte no reaparece como salto infinito.
+    if (!p1 || p1->m_isDead) {
+        clearRuntimeInput(layer, true);
+        return true;
+    }
+
+    if (anyShip && !buf.shipBuffer) {
+        resetPending();
+        buf.appliedInput = down;
+        return false;
+    }
+
+    // El jugador está vivo: cualquier entrada nueva invalida el reinicio de muerte.
+    buf.deathResetDone = false;
+    return true;
+}
+
+// Paso 5: Protege deliverPending()
+void deliverPending(PlayLayer* layer, PlayerObject* player) {
+    bool dual = false;
+    if (!player || player->m_isDead || (dual && layer->m_player2 && layer->m_player2->m_isDead)) {
+        clearRuntimeInput(layer, true);
+        return;
+    }
+}
+
+class $modify(MyPlayLayer, PlayLayer) {
+    // Paso 6: Corrige destroyPlayer()
+    void destroyPlayer(PlayerObject* player, GameObject* object) {
+        if (buf.simulating) {
+            buf.ghostDied = true;
+            return;
+        }
+
+        // Importante: limpiar antes de llamar al juego para soltar cualquier
+        // salto retrasado que todavía estuviera activo.
+        clearRuntimeInput(this, true);
+
+        PlayLayer::destroyPlayer(player, object);
+
+        // Limpieza final por si otro hook/mod modificó el estado durante la muerte.
+        clearRuntimeInput(this, false);
+    }
+
+    // Paso 7: Corrige resetLevel()
+    void resetLevel() {
+        // Soltar cualquier estado heredado del intento anterior.
+        clearRuntimeInput(this, true);
+
+        if (buf.pathNode) {
+            buf.pathNode->clear();
+        }
+
+        PlayLayer::resetLevel();
+
+        // No arrastrar clics, colas ni estado de botón al nuevo intento.
+        clearRuntimeInput(this, false);
+    }
+
+    // Paso 8: Limpia también al terminar el nivel en playEndAnimationToPos()
+    void playEndAnimationToPos(CCPoint position) {
+        if (buf.simulating) {
+            return;
+        }
+
+        clearRuntimeInput(this, true);
+        PlayLayer::playEndAnimationToPos(position);
+    }
+
+    // Paso 9: Reinicia el estado al crear el nivel en init()
+    bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
+        if (!PlayLayer::init(level, useReplay, dontCreateObjects)) {
+            return false;
+        }
+
+        clearRuntimeInput(this, false);
+
+        return true;
+    }
+};
+
+// Paso 10: Añade una protección en PlayerObject::update()
+class $modify(MyPlayerObject, PlayerObject) {
+    void update(float dt) {
+        if (buf.simulating) {
+            PlayerObject::update(dt);
+            return;
+        }
+
+        auto* layer = GameManager::get()->m_playLayer;
+        bool managedP1 = layer && this == layer->m_player1;
+
+        if (managedP1 && this->m_isDead) {
+            // No procesar entradas retrasadas durante la animación de muerte.
+            clearRuntimeInput(layer, true);
+            PlayerObject::update(dt);
+            clearRuntimeInput(layer, false);
+        }
+        else {
+            if (managedP1) {
+                ++tickCount;
+
+                if (buf.enabled) {
+                    deliverPending(layer, this);
+                }
+            }
+
+            PlayerObject::update(dt);
+
+            // Captura muertes aunque alguna otra ruta no pasara por destroyPlayer().
+            if (managedP1 &&
+                (this->m_isDead || (layer->m_player2 && layer->m_player2->m_isDead))) {
+                clearRuntimeInput(layer, true);
+            }
+        }
+
+        if (dt > 0.f) {
+            float avg = buf.tickLength;
+            buf.tickLength = (avg > 0.f && std::abs(dt - avg) < avg * 0.3f)
+                ? avg * 0.9f + dt * 0.1f
+                : dt;
+        }
+    }
+};
+
+
 
 namespace {
     constexpr int HOOK_PRIORITY = -1000000;
