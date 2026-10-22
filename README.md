@@ -13,7 +13,8 @@ Install the Geode CLI and SDK, then run:  geode build
 F6 cycle stage | F9 open/close the in-game console | F10 path view | F11 forget this level's memory
 
 ## Android64 (GD 2.2081)
-The same .geode (built by the workflow's Android64 job) works on Android 64-bit. There are no F-keys on a phone, so the four actions are buttons in the **pause menu**: Stage (F6), Console (F9), Path (F10) and Forget (F11). The status line above the buttons shows the current stage.
+The same .geode (built by the workflow's Android64 job) works on Android 64-bit. There are no F-keys on a phone, so the actions are buttons in the **pause menu**: Stage (F6), Console (F9), Path (F10), Auto (wave / robot / dash auto-release on or off together) and Forget (F11). The status line above the buttons shows the current state.
+Phones get their own "Prediction time budget on phones (ms)" setting (default 4 ms). Pausing also saves the level memory, since Android can close the app at any time.
 Everything else (prediction ghost, wave / robot / spider / ship / orb / dash logic, level memory, unlocked FPS) is platform-independent and works the same.
 Differences: the separate Windows console window does not exist on Android (the "Debug console" setting writes the log to Geode's log instead). Phones are slower than PCs, so if you get stutter, lower "Prediction time budget (ms)" and the lookahead settings.
 
@@ -37,3 +38,10 @@ Edit "yourname" in mod.json first. Practice use only; do not use for verified or
 - v2.25 ship (opt-in): ship presses/releases buffered with recovery-aware scoring, own small max delay, feathering passes through.
 - v2.26 orb timing: presses already inside an orb are re-timed within the orb if that survives, learned orb timings are tried first, predictions try later clicks inside orbs.
 - v2.27: late cube/ball crashes skip the search; experimental moving-object prediction (straight-line motion).
+
+
+## v2.28
+- Settings apply as soon as you change them (only "Debug console" still needs a restart).
+- The selected stage is remembered between launches.
+- Level memory is saved safely (temp file + rename), so a killed app can't leave a broken file.
+- Fix: no more ghost jumps / CPS spikes after dying while holding. The mod never injects input while you are dead, no longer re-presses what you hold after a respawn, and stops itself if it ever starts fighting the game (log line: `runaway self-input stopped`).
