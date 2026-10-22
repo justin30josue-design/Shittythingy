@@ -1,4 +1,4 @@
-// Basu Input Buffer v2.27 + Android64 port (cube-style wave, wave auto-release, orb alignment, full ghost state, drift check, in-game console on F9)
+// Basu Input Buffer v2.28 (Android64 port) (cube-style wave, wave auto-release, orb alignment, full ghost state, drift check, in-game console on F9)
 //
 // When you click (or release, in wave / robot), a hidden "ghost" player is simulated
 // ahead with your input. If the ghost dies, the input is retried with 1..N ticks of
@@ -355,6 +355,10 @@ namespace {
         auto* mod = Mod::get();
         buf.smart = mod->getSettingValue<bool>("smart-prediction");
         buf.budgetMs = mod->getSettingValue<double>("sim-budget-ms");
+#ifdef GEODE_IS_MOBILE
+        // Phones are slower than a PC: they get their own (lower) prediction budget.
+        buf.budgetMs = mod->getSettingValue<double>("mobile-sim-budget-ms");
+#endif
         buf.practiceOnly = mod->getSettingValue<bool>("practice-only");
         buf.groundHorizon = static_cast<int>(mod->getSettingValue<int64_t>("ground-horizon"));
         buf.waveHorizon = static_cast<int>(mod->getSettingValue<int64_t>("wave-horizon"));
@@ -872,10 +876,18 @@ namespace {
         }
         std::error_code ec;
         std::filesystem::create_directories(memoryFile().parent_path(), ec);
-        std::ofstream out(memoryFile(), std::ios::trunc);
-        for (auto const& [slice, spot] : memory) {
-            out << slice << ' ' << spot.ok << ' ' << spot.bad << ' ' << spot.deaths << ' ' << spot.delaySum << '\n';
+        // Write to a temp file and rename it over the real one, so being killed halfway
+        // through a save (Android does that) can't leave a truncated memory file.
+        auto path = memoryFile();
+        auto tmp = path;
+        tmp += ".tmp";
+        {
+            std::ofstream out(tmp, std::ios::trunc);
+            for (auto const& [slice, spot] : memory) {
+                out << slice << ' ' << spot.ok << ' ' << spot.bad << ' ' << spot.deaths << ' ' << spot.delaySum << '\n';
+            }
         }
+        std::filesystem::rename(tmp, path, ec);
         memoryDirty = false;
     }
 
@@ -1969,6 +1981,7 @@ namespace {
 
     void cycleStage() {
         buf.stage = (buf.stage + 1) % STAGE_COUNT;
+        Mod::get()->setSavedValue<int>("stage", buf.stage);
         resetPending();
         // A delayed input that was waiting is dropped; the game gets what you're really
         // holding now (otherwise, with the buffer switched off, it never would).
@@ -2003,6 +2016,18 @@ namespace {
         memoryDirty = true;
         saveMemory();
         say("memory for this level cleared");
+    }
+
+    // Pause-menu "Auto" button: turns wave / robot / dash auto-release on or off together.
+    void toggleAutoRelease() {
+        bool on = !(buf.autoRelease || buf.robotAutoRelease || buf.dashAutoRelease);
+        auto* mod = Mod::get();
+        mod->setSettingValue<bool>("wave-auto-release", on);
+        mod->setSettingValue<bool>("robot-auto-release", on);
+        mod->setSettingValue<bool>("dash-auto-release", on);
+        readSettings();
+        refreshAutoTag();
+        say("auto-release {} (wave / robot / dash)", on ? "on" : "off");
     }
 
     // Runaway guard: presses the mod makes on its own (re-syncing to what you hold, auto-release)
@@ -2151,8 +2176,16 @@ namespace {
 $on_mod(Loaded) {
     buf.console = Mod::get()->getSettingValue<bool>("debug-console");
     buf.showPath = Mod::get()->getSettingValue<bool>("show-path");
+    buf.stage = std::clamp<int>(Mod::get()->getSavedValue<int>("stage", buf.stage), 0, STAGE_COUNT - 1);
     readSettings();
     applyStage();
+    // Settings now apply as soon as you change them (before, only F6 / a restart re-read them).
+    // "Debug console" still needs a restart, as its description says.
+    (void)listenForAllSettingChanges([](std::shared_ptr<SettingV3>) {
+        readSettings();
+        applyStage();
+        refreshAutoTag();
+    }, Mod::get());
 #ifdef GEODE_IS_WINDOWS
     if (buf.console) {
         AllocConsole();
@@ -2162,9 +2195,9 @@ $on_mod(Loaded) {
     }
 #endif
 #ifdef GEODE_IS_DESKTOP
-    say("v2.27 loaded. F6 cycles: 0.5f -> 1f -> 2f -> 4f -> 6f -> 8f -> custom -> off");
+    say("v2.28 loaded. F6 cycles: 0.5f -> 1f -> 2f -> 4f -> 6f -> 8f -> custom -> off");
 #else
-    say("v2.27 loaded. Pause menu: Stage cycles 0.5f -> 1f -> 2f -> 4f -> 6f -> 8f -> custom -> off");
+    say("v2.28 loaded. Pause menu: Stage cycles 0.5f -> 1f -> 2f -> 4f -> 6f -> 8f -> custom -> off");
 #endif
 }
 
@@ -2272,7 +2305,7 @@ class $modify(BufPlayLayer, PlayLayer) {
 #ifdef GEODE_IS_DESKTOP
         char const* hintText = "F6 stage    F9 console    F10 path view    F11 forget level";
 #else
-        char const* hintText = "Pause menu: Stage / Console / Path / Forget";
+        char const* hintText = "Pause menu: Stage / Console / Path / Auto / Forget";
 #endif
         auto* hint = CCLabelBMFont::create(hintText, "chatFont.fnt");
         hint->setScale(0.45f);
@@ -2563,6 +2596,7 @@ class $modify(BufPauseLayer, PauseLayer) {
         if (!GameManager::get()->m_playLayer) {
             return;
         }
+        saveMemory();  // pausing is often the last thing before the OS backgrounds / kills the app
         auto win = CCDirector::get()->getWinSize();
 
         auto* status = CCLabelBMFont::create("", "bigFont.fnt");
@@ -2571,8 +2605,9 @@ class $modify(BufPauseLayer, PauseLayer) {
         this->addChild(status, 10);
 
         auto refresh = [status, maxW = win.width - 40.f]() {
-            status->setString(fmt::format("{}   |   console {}   |   path {}", stageText(), buf.panelOpen ? "on" : "off",
-                buf.showPath ? "on" : "off").c_str());
+            bool autoOn = buf.autoRelease || buf.robotAutoRelease || buf.dashAutoRelease;
+            status->setString(fmt::format("{}  |  console {}  |  path {}  |  auto {}", stageText(), buf.panelOpen ? "on" : "off",
+                buf.showPath ? "on" : "off", autoOn ? "on" : "off").c_str());
             status->limitLabelWidth(maxW, 0.4f, 0.2f);
         };
 
@@ -2593,6 +2628,7 @@ class $modify(BufPauseLayer, PauseLayer) {
         add("Stage", [] { cycleStage(); });
         add("Console", [] { toggleConsole(); });
         add("Path", [] { togglePathView(); });
+        add("Auto", [] { toggleAutoRelease(); });
         add("Forget", [] { forgetLevelMemory(); });
         menu->updateLayout();
         refresh();
