@@ -2181,7 +2181,7 @@ $on_mod(Loaded) {
     applyStage();
     // Settings now apply as soon as you change them (before, only F6 / a restart re-read them).
     // "Debug console" still needs a restart, as its description says.
-    (void)listenForAllSettingChanges([](std::shared_ptr<SettingV3>) {
+    (void)listenForAllSettingChanges([](std::string_view, std::shared_ptr<SettingV3>) {
         readSettings();
         applyStage();
         refreshAutoTag();
